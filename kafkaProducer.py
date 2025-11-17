@@ -17,14 +17,73 @@ KAFKA_SERVER = 'iot.redesuvg.cloud:9092'
 TOPIC = "21486"
 INTERVALO = 15  # segundos entre envíos
 
+# Mapeo de direcciones del viento a 3 bits (0-7)
+WIND_MAP = {'N': 0, 'NO': 1, 'O': 2, 'SO': 3, 'S': 4, 'SE': 5, 'E': 6, 'NE': 7}
+
+
+def codificar_datos(temperatura, humedad, direccion_viento):
+    """
+    Codifica los datos de los sensores en 3 bytes (24 bits)
+    
+    Formato de 24 bits:
+    - Bits 23-10 (14 bits): Temperatura en centésimas [0-11000]
+    - Bits 9-3 (7 bits): Humedad [0-100]
+    - Bits 2-0 (3 bits): Dirección del viento [0-7]
+    
+    Retorna: bytes (3 bytes)
+    """
+    # Temperatura en centésimas (14 bits)
+    temp_int = int(round(temperatura * 100))
+    temp_int = max(0, min(16383, temp_int))  # Limitar a 14 bits (0-16383)
+    
+    # Humedad (7 bits)
+    hum_int = max(0, min(127, humedad))  # Limitar a 7 bits (0-127)
+    
+    # Dirección del viento (3 bits)
+    wind_code = WIND_MAP.get(direccion_viento, 0)  # 0-7
+    
+    # Empaquetar en 24 bits: [temp(14)][ hum(7) ][ wind(3) ]
+    packed = (temp_int << 10) | (hum_int << 3) | wind_code
+    
+    # Convertir a 3 bytes (big-endian)
+    return packed.to_bytes(3, byteorder='big')
+
+
+def decodificar_datos_debug(data_bytes):
+    """
+    Decodifica 3 bytes para verificar (solo para debug)
+    Retorna: dict con temperatura, humedad, direccion_viento
+    """
+    # Convertir bytes a entero
+    packed = int.from_bytes(data_bytes, byteorder='big')
+    
+    # Extraer campos
+    temp_int = (packed >> 10) & 0x3FFF  # 14 bits
+    hum_int = (packed >> 3) & 0x7F      # 7 bits
+    wind_code = packed & 0x07            # 3 bits
+    
+    # Convertir a valores originales
+    temperatura = temp_int / 100.0
+    humedad = hum_int
+    
+    # Mapeo inverso de dirección
+    wind_map_inv = {v: k for k, v in WIND_MAP.items()}
+    direccion = wind_map_inv.get(wind_code, 'N')
+    
+    return {
+        'temperatura': temperatura,
+        'humedad': humedad,
+        'direccion_viento': direccion
+    }
+
 
 def create_producer():
     """Crea y configura un productor Kafka"""
     try:
         producer = KafkaProducer(
             bootstrap_servers=[KAFKA_SERVER],
-            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-            acks='all',  # Esperar confirmación de todas las réplicas
+            # Sin serializador - enviamos bytes directamente
+            acks='all',
             retries=3,
             request_timeout_ms=30000
         )
@@ -40,17 +99,44 @@ def enviar_lectura(producer, topic):
     try:
         # Generar datos de los sensores
         data = generar_data()
+        temperatura = data['temperatura']
+        humedad = data['humedad']
+        direccion = data['direccion_viento']
         
-        # Enviar al broker Kafka
-        future = producer.send(topic, value=data)
+        # Codificar en 3 bytes (24 bits)
+        payload_bytes = codificar_datos(temperatura, humedad, direccion)
+        
+        # Enviar al broker Kafka (3 bytes)
+        future = producer.send(topic, value=payload_bytes)
         record_metadata = future.get(timeout=10)
+        
+        # Decodificar para verificación (debug)
+        data_verificado = decodificar_datos_debug(payload_bytes)
         
         # Mostrar confirmación
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Mensaje enviado exitosamente")
         print(f"  Topic: {record_metadata.topic}")
         print(f"  Partición: {record_metadata.partition}")
         print(f"  Offset: {record_metadata.offset}")
-        print(f"  Datos: {json.dumps(data, indent=2)}")
+        print(f"  Payload: {len(payload_bytes)} bytes = {len(payload_bytes) * 8} bits")
+        print(f"  Hex: {payload_bytes.hex()}")
+        print(f"  Datos originales:")
+        print(f"    Temperatura: {temperatura}°C")
+        print(f"    Humedad: {humedad}%")
+        print(f"    Dirección: {direccion}")
+        print(f"  Datos codificados:")
+        temp_int = int(round(temperatura * 100))
+        hum_int = humedad
+        wind_code = WIND_MAP.get(direccion, 0)
+        print(f"    Temp int: {temp_int} (14 bits: {bin(temp_int)[2:].zfill(14)})")
+        print(f"    Hum int: {hum_int} (7 bits: {bin(hum_int)[2:].zfill(7)})")
+        print(f"    Wind code: {wind_code} (3 bits: {bin(wind_code)[2:].zfill(3)})")
+        packed = (temp_int << 10) | (hum_int << 3) | wind_code
+        print(f"    Packed 24 bits: {bin(packed)[2:].zfill(24)}")
+        print(f"  Datos decodificados (verificación):")
+        print(f"    Temperatura: {data_verificado['temperatura']}°C")
+        print(f"    Humedad: {data_verificado['humedad']}%")
+        print(f"    Dirección: {data_verificado['direccion_viento']}")
         
         return True
         
@@ -65,11 +151,12 @@ def enviar_lectura(producer, topic):
 def iniciar_productor():
     """Inicia el producer y envía lecturas periódicamente"""
     print("=" * 70)
-    print("Estacion Meteorologica")
+    print("Estacion Meteorologica - Payload Comprimido (3 bytes)")
     print("=" * 70)
     print(f"Servidor: {KAFKA_SERVER}")
     print(f"Topic: {TOPIC}")
     print(f"Intervalo: {INTERVALO} segundos")
+    print(f"Formato: 24 bits = Temp(14b) + Humedad(7b) + Viento(3b)")
     print("=" * 70)
     
     # Crear producer

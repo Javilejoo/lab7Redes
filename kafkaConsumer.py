@@ -26,6 +26,40 @@ timestamps = []
 # Mapeo de direcciones para graficar
 DIRECCIONES_MAP = {'N': 0, 'NE': 45, 'E': 90, 'SE': 135, 'S': 180, 'SO': 225, 'O': 270, 'NO': 315}
 
+# Mapeo inverso para decodificar dirección del viento (3 bits)
+WIND_CODE_MAP = {0: 'N', 1: 'NO', 2: 'O', 3: 'SO', 4: 'S', 5: 'SE', 6: 'E', 7: 'NE'}
+
+
+def decodificar_datos(data_bytes):
+    """
+    Decodifica 3 bytes (24 bits) a datos de sensores
+    
+    Formato de 24 bits:
+    - Bits 23-10 (14 bits): Temperatura en centésimas [0-11000]
+    - Bits 9-3 (7 bits): Humedad [0-100]
+    - Bits 2-0 (3 bits): Dirección del viento [0-7]
+    
+    Retorna: dict con temperatura, humedad, direccion_viento
+    """
+    # Convertir bytes a entero de 24 bits
+    packed = int.from_bytes(data_bytes, byteorder='big')
+    
+    # Extraer campos usando máscaras de bits
+    temp_int = (packed >> 10) & 0x3FFF  # 14 bits (máscara: 0x3FFF = 16383)
+    hum_int = (packed >> 3) & 0x7F      # 7 bits (máscara: 0x7F = 127)
+    wind_code = packed & 0x07            # 3 bits (máscara: 0x07 = 7)
+    
+    # Convertir a valores reales
+    temperatura = temp_int / 100.0  # De centésimas a decimal
+    humedad = hum_int
+    direccion = WIND_CODE_MAP.get(wind_code, 'N')
+    
+    return {
+        'temperatura': temperatura,
+        'humedad': humedad,
+        'direccion_viento': direccion
+    }
+
 
 def create_consumer():
     """Crea y configura un consumidor Kafka"""
@@ -36,11 +70,12 @@ def create_consumer():
             auto_offset_reset='latest',  # Solo leer mensajes nuevos
             enable_auto_commit=True,
             group_id=GROUP_ID,
-            value_deserializer=lambda m: json.loads(m.decode('utf-8')),
+            # Sin deserializador - recibimos bytes directamente
             consumer_timeout_ms=1000  # Timeout para actualización de gráfica
         )
         print(f"✓ Consumer conectado a {KAFKA_SERVER}")
         print(f"✓ Suscrito al topic: {TOPIC}")
+        print(f"✓ Formato: Payload de 3 bytes (24 bits)")
         return consumer
     except Exception as e:
         print(f"✗ Error al crear consumer: {e}")
@@ -50,12 +85,21 @@ def create_consumer():
 def procesar_mensaje(message):
     """Procesa un mensaje recibido y actualiza las listas de datos"""
     try:
-        data = message.value
+        # El valor del mensaje son bytes directamente
+        data_bytes = message.value
+        
+        # Verificar que sean exactamente 3 bytes
+        if len(data_bytes) != 3:
+            print(f"✗ Payload inválido: {len(data_bytes)} bytes (esperado: 3)")
+            return False
+        
+        # Decodificar los 3 bytes
+        data = decodificar_datos(data_bytes)
         
         # Extraer datos
-        temperatura = data.get('temperatura')
-        humedad = data.get('humedad')
-        direccion = data.get('direccion_viento')
+        temperatura = data['temperatura']
+        humedad = data['humedad']
+        direccion = data['direccion_viento']
         
         # Agregar a las listas
         all_temp.append(temperatura)
@@ -65,6 +109,8 @@ def procesar_mensaje(message):
         
         # Mostrar datos recibidos
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Mensaje recibido")
+        print(f"  Payload: {len(data_bytes)} bytes = {len(data_bytes) * 8} bits")
+        print(f"  Hex: {data_bytes.hex()}")
         print(f"  Temperatura: {temperatura}°C")
         print(f"  Humedad: {humedad}%")
         print(f"  Dirección del viento: {direccion}")
@@ -132,11 +178,12 @@ def graficar_datos():
 def iniciar_consumer():
     """Inicia el consumer y visualiza datos en tiempo real"""
     print("=" * 70)
-    print("Kafka Consumer - Estación Meteorológica")
+    print("Kafka Consumer - Estación Meteorológica (Payload 3 bytes)")
     print("=" * 70)
     print(f"Servidor: {KAFKA_SERVER}")
     print(f"Topic: {TOPIC}")
     print(f"Group ID: {GROUP_ID}")
+    print(f"Formato: 24 bits = Temp(14b) + Humedad(7b) + Viento(3b)")
     print("=" * 70)
     
     # Crear consumer
